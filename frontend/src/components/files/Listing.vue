@@ -5,11 +5,10 @@
       <span>{{ $t('files.lonely') }}</span>
     </h2>
     <input style="display:none" type="file" id="upload-input" @change="uploadInput($event)" multiple>
+    <input style="display:none" type="file" id="upload-folder-input" @change="uploadInput($event)" webkitdirectory multiple>
   </div>
   <div v-else id="listing"
-    :class="user.viewMode"
-    @dragenter="dragEnter"
-    @dragend="dragEnd">
+    :class="user.viewMode">
     <div>
       <div class="item header">
         <div></div>
@@ -75,6 +74,7 @@
     </div>
 
     <input style="display:none" type="file" id="upload-input" @change="uploadInput($event)" multiple>
+    <input style="display:none" type="file" id="upload-folder-input" @change="uploadInput($event)" webkitdirectory multiple>
 
     <div :class="{ active: $store.state.multiple }" id="multiple-selection">
     <p>{{ $t('files.multipleSelectionEnabled') }}</p>
@@ -90,19 +90,19 @@ import { mapState, mapMutations } from 'vuex'
 import Item from './ListingItem'
 import css from '@/utils/css'
 import { users, files as api } from '@/api'
-import buttons from '@/utils/buttons'
-import url from '@/utils/url'
+import * as upload  from '@/utils/upload'
 
 export default {
   name: 'listing',
   components: { Item },
   data: function () {
     return {
-      show: 50
+      showLimit: 50,
+      dragCounter: 0
     }
   },
   computed: {
-    ...mapState(['req', 'selected', 'user']),
+    ...mapState(['req', 'selected', 'user', 'show']),
     nameSorted () {
       return (this.req.sorting.by === 'name')
     },
@@ -130,14 +130,14 @@ export default {
       return { dirs, files }
     },
     dirs () {
-      return this.items.dirs.slice(0, this.show)
+      return this.items.dirs.slice(0, this.showLimit)
     },
     files () {
-      let show = this.show - this.items.dirs.length
+      let showLimit = this.showLimit - this.items.dirs.length
 
-      if (show < 0) show = 0
+      if (showLimit < 0) showLimit = 0
 
-      return this.items.files.slice(0, show)
+      return this.items.files.slice(0, showLimit)
     },
     nameIcon () {
       if (this.nameSorted && !this.ascOrdered) {
@@ -170,6 +170,8 @@ export default {
     window.addEventListener('resize', this.resizeEvent)
     window.addEventListener('scroll', this.scrollEvent)
     document.addEventListener('dragover', this.preventDefault)
+    document.addEventListener('dragenter', this.dragEnter)
+    document.addEventListener('dragleave', this.dragLeave)
     document.addEventListener('drop', this.drop)
   },
   beforeDestroy () {
@@ -178,14 +180,20 @@ export default {
     window.removeEventListener('resize', this.resizeEvent)
     window.removeEventListener('scroll', this.scrollEvent)
     document.removeEventListener('dragover', this.preventDefault)
+    document.removeEventListener('dragenter', this.dragEnter)
+    document.removeEventListener('dragleave', this.dragLeave)
     document.removeEventListener('drop', this.drop)
   },
   methods: {
-    ...mapMutations([ 'updateUser' ]),
+    ...mapMutations([ 'updateUser', 'addSelected' ]),
     base64: function (name) {
       return window.btoa(unescape(encodeURIComponent(name)))
     },
     keyEvent (event) {
+      if (this.show !== null) {
+        return
+      }
+
       if (!event.ctrlKey && !event.metaKey) {
         return
       }
@@ -203,6 +211,19 @@ export default {
           break
         case 'v':
           this.paste(event)
+          break
+        case 'a':
+          event.preventDefault()
+          for (let file of this.items.files) {
+            if (this.$store.state.selected.indexOf(file.index) === -1) {
+              this.addSelected(file.index)
+            }
+          }
+          for (let dir of this.items.dirs) {
+            if (this.$store.state.selected.indexOf(dir.index) === -1) {
+              this.addSelected(dir.index)
+            }
+          }
           break
       }
     },
@@ -230,7 +251,8 @@ export default {
 
       this.$store.commit('updateClipboard', {
         key: key,
-        items: items
+        items: items,
+        path: this.$route.path
       })
     },
     paste (event) {
@@ -243,23 +265,56 @@ export default {
       for (let item of this.$store.state.clipboard.items) {
         const from = item.from.endsWith('/') ? item.from.slice(0, -1) : item.from
         const to = this.$route.path + item.name
-        items.push({ from, to })
+        items.push({ from, to, name: item.name })
       }
 
       if (items.length === 0) {
         return
       }
 
-      if (this.$store.state.clipboard.key === 'x') {
-        api.move(items).then(() => {
+      let action = (overwrite, rename) => {
+        api.copy(items, overwrite, rename).then(() => {
           this.$store.commit('setReload', true)
         }).catch(this.$showError)
+      }
+
+      if (this.$store.state.clipboard.key === 'x') {
+        action = (overwrite, rename) => {
+          api.move(items, overwrite, rename).then(() => {
+            this.$store.commit('resetClipboard')
+            this.$store.commit('setReload', true)
+          }).catch(this.$showError)
+        }
+      }
+
+      if (this.$store.state.clipboard.path == this.$route.path) {
+        action(false, true)
+
         return
       }
 
-      api.copy(items).then(() => {
-        this.$store.commit('setReload', true)
-      }).catch(this.$showError)
+      let conflict = upload.checkConflict(items, this.req.items)
+
+      let overwrite = false
+      let rename = false
+
+      if (conflict) {
+        this.$store.commit('showHover', {
+          prompt: 'replace-rename',
+          confirm: (event, option) => {
+            overwrite = option == 'overwrite'
+            rename = option == 'rename'
+
+            event.preventDefault()
+            this.$store.commit('closeHovers')
+            action(overwrite, rename)
+          }
+        })
+
+        return
+      }
+
+      action(overwrite, rename)
     },
     resizeEvent () {
       // Update the columns size based on the window width.
@@ -270,10 +325,12 @@ export default {
     },
     scrollEvent () {
       if ((window.innerHeight + window.scrollY) >= document.body.offsetHeight) {
-        this.show += 50
+        this.showLimit += 50
       }
     },
     dragEnter () {
+      this.dragCounter++
+
       // When the user starts dragging an item, put every
       // file on the listing with 50% opacity.
       let items = document.getElementsByClassName('item')
@@ -282,18 +339,22 @@ export default {
         file.style.opacity = 0.5
       })
     },
-    dragEnd () {
-      this.resetOpacity()
+    dragLeave () {
+      this.dragCounter--
+
+      if (this.dragCounter == 0) {
+        this.resetOpacity()
+      }
     },
-    drop: function (event) {
+    drop: async function (event) {
       event.preventDefault()
+      this.dragCounter = 0
       this.resetOpacity()
 
       let dt = event.dataTransfer
-      let files = dt.files
       let el = event.target
 
-      if (files.length <= 0) return
+      if (dt.files.length <= 0) return
 
       for (let i = 0; i < 5; i++) {
         if (el !== null && !el.classList.contains('item')) {
@@ -306,51 +367,65 @@ export default {
         base = el.querySelector('.name').innerHTML + '/'
       }
 
+      let files = await upload.scanFiles(dt)
+      let path = this.$route.path + base
+      let items = this.req.items
+
       if (base !== '') {
-        api.fetch(this.$route.path + base)
-          .then(req => {
-            this.checkConflict(files, req.items, base)
-          })
-          .catch(this.$showError)
+        try {
+          items = (await api.fetch(path)).items
+        } catch (error) {
+          this.$showError(error)
+        }
+      }
+
+      let conflict = upload.checkConflict(files, items)
+
+      if (conflict) {
+        this.$store.commit('showHover', {
+          prompt: 'replace',
+          confirm: (event) => {
+            event.preventDefault()
+            this.$store.commit('closeHovers')
+            upload.handleFiles(files, path, true)
+          }
+        })
 
         return
       }
 
-      this.checkConflict(files, this.req.items, base)
-    },
-    checkConflict (files, items, base) {
-      if (typeof items === 'undefined' || items === null) {
-        items = []
-      }
-
-      let conflict = false
-      for (let i = 0; i < files.length; i++) {
-        let res = items.findIndex(function hasConflict (element) {
-          return (element.name === this)
-        }, files[i].name)
-
-        if (res >= 0) {
-          conflict = true
-          break
-        }
-      }
-
-      if (!conflict) {
-        this.handleFiles(files, base)
-        return
-      }
-
-      this.$store.commit('showHover', {
-        prompt: 'replace',
-        confirm: (event) => {
-          event.preventDefault()
-          this.$store.commit('closeHovers')
-          this.handleFiles(files, base, true)
-        }
-      })
+      upload.handleFiles(files, path)
     },
     uploadInput (event) {
-      this.checkConflict(event.currentTarget.files, this.req.items, '')
+      this.$store.commit('closeHovers')
+
+      let files = event.currentTarget.files
+      let folder_upload = files[0].webkitRelativePath !== undefined && files[0].webkitRelativePath !== ''
+
+      if (folder_upload) {
+        for (let i = 0; i < files.length; i++) {
+          let file = files[i]
+          files[i].fullPath = file.webkitRelativePath
+        }
+      }
+
+      let path = this.$route.path
+      let conflict = upload.checkConflict(files, this.req.items)
+
+      if (conflict) {
+        this.$store.commit('showHover', {
+          prompt: 'replace',
+          confirm: (event) => {
+            event.preventDefault()
+            this.$store.commit('closeHovers')
+            upload.handleFiles(files, path, true)
+          }
+        })
+
+        return
+      }
+
+      upload.handleFiles(files, path)
     },
     resetOpacity () {
       let items = document.getElementsByClassName('item')
@@ -358,45 +433,6 @@ export default {
       Array.from(items).forEach(file => {
         file.style.opacity = 1
       })
-    },
-    handleFiles (files, base, overwrite = false) {
-      buttons.loading('upload')
-      let promises = []
-      let progress = new Array(files.length).fill(0)
-
-      let onupload = (id) => (event) => {
-        progress[id] = (event.loaded / event.total) * 100
-
-        let sum = 0
-        for (let i = 0; i < progress.length; i++) {
-          sum += progress[i]
-        }
-
-        this.$store.commit('setProgress', Math.ceil(sum / progress.length))
-      }
-
-      for (let i = 0; i < files.length; i++) {
-        let file = files[i]
-        let filenameEncoded = url.encodeRFC5987ValueChars(file.name)
-        promises.push(api.post(this.$route.path + base + filenameEncoded, file, overwrite, onupload(i)))
-      }
-
-      let finish = () => {
-        buttons.success('upload')
-        this.$store.commit('setProgress', 0)
-      }
-
-      Promise.all(promises)
-        .then(() => {
-          finish()
-          this.$store.commit('setReload', true)
-        })
-        .catch(error => {
-          finish()
-          this.$showError(error)
-        })
-
-      return false
     },
     async sort (by) {
       let asc = false

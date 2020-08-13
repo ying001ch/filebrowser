@@ -1,6 +1,6 @@
 <template>
   <div>
-    <component :is="currentComponent"></component>
+    <component ref="currentComponent" :is="currentComponent"></component>
     <div v-show="showOverlay" @click="resetPrompts" class="overlay"></div>
   </div>
 </template>
@@ -16,7 +16,9 @@ import Copy from './Copy'
 import NewFile from './NewFile'
 import NewDir from './NewDir'
 import Replace from './Replace'
+import ReplaceRename from './ReplaceRename'
 import Share from './Share'
+import Upload from './Upload'
 import { mapState } from 'vuex'
 import buttons from '@/utils/buttons'
 
@@ -33,7 +35,9 @@ export default {
     NewFile,
     NewDir,
     Help,
-    Replace
+    Replace,
+    ReplaceRename,
+    Upload
   },
   data: function () {
     return {
@@ -43,6 +47,33 @@ export default {
         'router': this.$router
       }
     }
+  },
+  created () {
+    window.addEventListener('keydown', (event) => {
+      if (this.show == null)
+      return
+
+      let prompt = this.$refs.currentComponent;
+
+      // Enter
+      if (event.keyCode == 13) {
+        switch (this.show) {
+          case 'delete':
+            prompt.submit()
+            break;
+          case 'copy':
+            prompt.copy(event)
+            break;
+          case 'move':
+            prompt.move(event)
+            break;
+          case 'replace':
+            prompt.showConfirm(event)
+            break;
+        }
+
+      }
+    })
   },
   computed: {
     ...mapState(['show', 'plugins']),
@@ -58,7 +89,9 @@ export default {
         'newDir',
         'download',
         'replace',
-        'share'
+        'replace-rename',
+        'share',
+        'upload'
       ].indexOf(this.show) >= 0;
 
       return matched && this.show || null;

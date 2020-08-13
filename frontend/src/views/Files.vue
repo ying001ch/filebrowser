@@ -1,6 +1,6 @@
 <template>
   <div>
-    <div id="breadcrumbs">
+    <div id="breadcrumbs" v-if="isListing || error">
       <router-link to="/files/" :aria-label="$t('files.home')" :title="$t('files.home')">
         <i class="material-icons">home</i>
       </router-link>
@@ -10,14 +10,15 @@
         <router-link :to="link.url">{{ link.name }}</router-link>
       </span>
     </div>
+
     <div v-if="error">
       <not-found v-if="error.message === '404'"></not-found>
       <forbidden v-else-if="error.message === '403'"></forbidden>
       <internal-error v-else></internal-error>
     </div>
+    <preview v-else-if="isPreview"></preview>
     <editor v-else-if="isEditor"></editor>
     <listing :class="{ multiple }" v-else-if="isListing"></listing>
-    <preview v-else-if="isPreview"></preview>
     <div v-else>
       <h2 class="message">
         <span>{{ $t('files.loading') }}</span>
@@ -61,10 +62,11 @@ export default {
       'user',
       'reload',
       'multiple',
-      'loading'
+      'loading',
+      'show'
     ]),
     isPreview () {
-      return !this.loading && !this.isListing && !this.isEditor
+      return !this.loading && !this.isListing && !this.isEditor || this.loading && this.$store.state.previewMode
     },
     breadcrumbs () {
       let parts = this.$route.path.split('/')
@@ -158,10 +160,17 @@ export default {
       }
     },
     keyEvent (event) {
-      // Esc!
-      if (event.keyCode === 27) {
-        this.$store.commit('closeHovers')
+      if (this.show !== null) {
+        // Esc!
+        if (event.keyCode === 27) {
+          this.$store.commit('closeHovers')
+        }
 
+        return
+      }
+
+      // Esc!
+      if (event.keyCode === 27) {        
         // If we're on a listing, unselect all
         // files and folders.
         if (this.isListing) {
